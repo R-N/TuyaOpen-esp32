@@ -13,6 +13,8 @@
 #include "tkl_flash.h"
 #include "tuya_error_code.h"
 #include "esp_partition.h"
+#include "esp_err.h"
+#include "esp_log.h"
 
 /* TODO: need to consider whether to use locks at the TKL layer*/
 #define PARTITION_SIZE         (1 << 12) /* 4KB */
@@ -26,16 +28,34 @@
 #define SIMPLE_FLASH_SIZE 0x8000 // 32K
 
 //UF
+#ifndef UF_PARTITION_NUM
 #define UF_PARTITION_NUM     1
-#define UF_PARTITION_START  (SIMPLE_FLASH_START + SIMPLE_FLASH_SIZE)
-#define UF_PARTITION_SIZE   0x18000 // 96K
+#endif
+
+#ifndef UF_PARTITION_START
+#define UF_PARTITION_START  0x26C000
+#endif
+
+#ifndef UF_PARTITION_SIZE
+#define UF_PARTITION_SIZE   0x134000
+#endif
 
 #if defined(KV_PROTECTED_ENABLE) && (KV_PROTECTED_ENABLE==1)
 #define SIMPLE_FLASH_KV_PROTECTED_START (UF_PARTITION_START + UF_PARTITION_SIZE)
-#define SIMPLE_FLASH_KV_PROTECTED_SIZE 0x1000 //4K
+#define SIMPLE_FLASH_KV_PROTECTED_SIZE 0x1000
 #endif
 
-#define GET_TUYA_DATA_PARTITION() esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "tuya")
+#ifndef TUYA_PARTITION_SUBTYPE
+#define TUYA_PARTITION_SUBTYPE ESP_PARTITION_SUBTYPE_DATA_SPIFFS
+#endif
+
+#ifndef TUYA_PARTITION_LABEL
+#define TUYA_PARTITION_LABEL "spiffs"
+#endif
+
+#ifndef GET_TUYA_DATA_PARTITION
+#define GET_TUYA_DATA_PARTITION() esp_partition_find_first(ESP_PARTITION_TYPE_DATA, TUYA_PARTITION_SUBTYPE, TUYA_PARTITION_LABEL)
+#endif
 
 typedef struct {
     char *uuid;
@@ -62,13 +82,23 @@ OPERATE_RET tkl_flash_read(uint32_t addr, uint8_t *dst, uint32_t size)
     if (NULL == dst) {
         return OPRT_INVALID_PARM;
     }
-
+    
     partition = GET_TUYA_DATA_PARTITION();
     if (NULL == partition) {
+        ESP_LOGE("FL", "PARTITION NOT FOUND. label: %s. address: 0x%X", partition->label, (unsigned int)partition->address);
         return OPRT_COM_ERROR;
     }
 
-    if (ESP_OK != esp_partition_read(partition, addr, dst, size)) {
+    esp_err_t err = esp_partition_read(partition, (unsigned int)(addr - partition->address), dst, size);
+    if (ESP_OK != err) {
+        ESP_LOGE("FL", "esp_partition_read NOT ESP_OK 0x%X: %s. label: %s. address: 0x%X / 0x%X. dst: 0x%X %d / %d", 
+            err, esp_err_to_name(err), 
+            partition->label, 
+            (unsigned int)addr, (unsigned int)partition->address, 
+            (unsigned int)dst, 
+            (unsigned int)size, (unsigned int)sizeof(dst)
+        );
+        
         return OPRT_COM_ERROR;
     }
 
@@ -101,7 +131,7 @@ OPERATE_RET tkl_flash_write(uint32_t addr, const uint8_t *src, uint32_t size)
         return OPRT_COM_ERROR;
     }
 
-    if (ESP_OK != esp_partition_write(partition, addr, src, size)) {
+    if (ESP_OK != esp_partition_write(partition, (unsigned int)(addr - partition->address), src, size)) {
         return OPRT_COM_ERROR;
     }
 
@@ -129,7 +159,7 @@ OPERATE_RET tkl_flash_erase(uint32_t addr, uint32_t size)
         return OPRT_COM_ERROR;
     }
 
-    if (ESP_OK != esp_partition_erase_range(partition, addr, size)) {
+    if (ESP_OK != esp_partition_erase_range(partition, (unsigned int)(addr - partition->address), size)) {
         return OPRT_COM_ERROR;
     }
 
