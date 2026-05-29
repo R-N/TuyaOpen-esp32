@@ -17,3 +17,5 @@ dependencies.lock
 
 .mirror
 __pycache__
+/.omo
+/.psram_snapshots
