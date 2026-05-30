@@ -349,6 +349,32 @@ def apply_to_vendor(snapshots_dir, vendor_dir, dry_run=False):
     if skipped:
         print(f"Excluded from staging (kept original archive copy): {sorted(skipped)}")
 
+    variant_names = {v["name"] for v in VARIANTS}
+    expected_files = {
+        os.path.basename(a[2]) for a in actions
+        if a[0] == "copy" and a[2].startswith(libs_dst)
+    }
+    stale_variant_libs = []
+    if os.path.isdir(libs_dst):
+        for fname in sorted(os.listdir(libs_dst)):
+            if not fname.endswith(".a"):
+                continue
+            for v in variant_names:
+                suffix = f"_{v}.a"
+                if not fname.endswith(suffix):
+                    continue
+                bare = fname[:-len(suffix)] + ".a"
+                if bare in EXCLUDED_VENDOR_LIBS:
+                    break
+                if fname not in expected_files:
+                    actions.append((
+                        "delete-if-exists", os.path.join(libs_dst, fname)
+                    ))
+                    stale_variant_libs.append(fname)
+                break
+    if stale_variant_libs:
+        print(f"Purging {len(stale_variant_libs)} stale variant-suffixed libs not in current build")
+
     base_snap = os.path.join(snapshots_dir, BASE_VARIANT)
     base_ld = os.path.join(base_snap, "ld")
     if os.path.isdir(base_ld):
