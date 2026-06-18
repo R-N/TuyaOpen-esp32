@@ -19,3 +19,5 @@ dependencies.lock
 __pycache__
 /.omo
 /.psram_snapshots
+/.vendor_lib_snapshot
+.psram_build.log

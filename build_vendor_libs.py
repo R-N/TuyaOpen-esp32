@@ -57,17 +57,17 @@ def sha256_file(path):
 
 
 def collect_idf_libs(build_dir):
+    # Recurse: managed components (mbedtls, lvgl, speech, ...) nest their .a
+    # several levels deep (e.g. esp-idf/mbedtls/mbedtls/library/libmbedcrypto.a),
+    # so a one-level scan misses them. Last writer wins on duplicate basenames.
     out = {}
     idf_dir = os.path.join(build_dir, "esp-idf")
     if not os.path.isdir(idf_dir):
         return out
-    for comp in os.listdir(idf_dir):
-        comp_path = os.path.join(idf_dir, comp)
-        if not os.path.isdir(comp_path):
-            continue
-        for f in os.listdir(comp_path):
+    for dirpath, _, files in os.walk(idf_dir):
+        for f in files:
             if f.endswith(".a"):
-                out[f] = os.path.join(comp_path, f)
+                out[f] = os.path.join(dirpath, f)
     return out
 
 
@@ -118,8 +118,8 @@ def run_tos_build(tuyaopen_root, app_dir):
     return result.returncode == 0
 
 
-def snapshot_build(tuya_open_esp32_root, app_dir, snapshots_dir):
-    snap_root = os.path.join(snapshots_dir, SNAPSHOT_NAME)
+def snapshot_build(tuya_open_esp32_root, app_dir, snapshots_dir, snap_name=SNAPSHOT_NAME):
+    snap_root = os.path.join(snapshots_dir, snap_name)
     rm_rf(snap_root)
     os.makedirs(snap_root, exist_ok=True)
 
@@ -159,16 +159,32 @@ def validate_spiram_disabled(sdkconfig_path):
     return True
 
 
-def apply_to_vendor(snapshots_dir, vendor_dir, dry_run=False):
-    snap_root = os.path.join(snapshots_dir, SNAPSHOT_NAME)
+def validate_spiram_enabled(sdkconfig_path):
+    if not os.path.isfile(sdkconfig_path):
+        print(f"Error: missing {sdkconfig_path}")
+        return False
+    with open(sdkconfig_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    # Accept both the defaults form (CONFIG_SPIRAM=y) and the generated C header
+    # form (#define CONFIG_SPIRAM 1) so this works on sdkconfig_* and sdkconfig.h.
+    if "CONFIG_SPIRAM=y" not in text and "#define CONFIG_SPIRAM 1" not in text:
+        print(f"Error: {sdkconfig_path} does not have SPIRAM enabled")
+        return False
+    return True
+
+
+def apply_to_vendor(snapshots_dir, vendor_dir, snap_name=SNAPSHOT_NAME, dir_suffix="", dry_run=False):
+    snap_root = os.path.join(snapshots_dir, snap_name)
     idf_libs = collect_dir_libs(os.path.join(snap_root, "idf-libs"))
     tuya_libs = collect_dir_libs(os.path.join(snap_root, "tuya-libs"))
     libs = {}
     libs.update(idf_libs)
     libs.update(tuya_libs)
 
-    libs_dst = os.path.join(vendor_dir, "libs")
-    link_dst_root = os.path.join(vendor_dir, "link_path")
+    # PSRAM flavor stages into parallel dirs (libs_psram / link_path_psram) so the
+    # SPIRAM-disabled default vendor tree is left untouched; boards.txt menu selects.
+    libs_dst = os.path.join(vendor_dir, "libs" + dir_suffix)
+    link_dst_root = os.path.join(vendor_dir, "link_path" + dir_suffix)
     platform_build = os.path.join(vendor_dir, "platform", "ESP32", "tuya_open_sdk", "build")
 
     actions = [("copy", src, os.path.join(libs_dst, name)) for name, src in sorted(libs.items())]
@@ -183,7 +199,7 @@ def apply_to_vendor(snapshots_dir, vendor_dir, dry_run=False):
         actions.append(("copy", sdkconfig_h, os.path.join(platform_build, "config", "sdkconfig.h")))
 
     manifest = {
-        "build": SNAPSHOT_NAME,
+        "build": snap_name,
         "idf_lib_count": len(idf_libs),
         "tuya_lib_count": len(tuya_libs),
         "lib_count": len(libs),
@@ -215,19 +231,19 @@ def apply_to_vendor(snapshots_dir, vendor_dir, dry_run=False):
     return manifest
 
 
-def sync_idf_prebuilt_blobs(idf_root, vendor_dir, dry_run=False):
+def sync_idf_prebuilt_blobs(idf_root, vendor_dir, dir_suffix="", dry_run=False):
     actions = []
     for blob_dir_rel in IDF_PREBUILT_BLOB_DIRS:
         src_dir = os.path.join(idf_root, blob_dir_rel)
         if not os.path.isdir(src_dir):
             print(f"WARN: IDF prebuilt blob dir missing: {src_dir}")
             continue
-        dst_dir = os.path.join(vendor_dir, "link_path", "esp-idf", blob_dir_rel)
+        dst_dir = os.path.join(vendor_dir, "link_path" + dir_suffix, "esp-idf", blob_dir_rel)
         for f in os.listdir(src_dir):
             if f.endswith(".a"):
                 actions.append((os.path.join(src_dir, f), os.path.join(dst_dir, f)))
 
-    libs_dst = os.path.join(vendor_dir, "libs")
+    libs_dst = os.path.join(vendor_dir, "libs" + dir_suffix)
     if os.path.isdir(libs_dst):
         for src, _ in list(actions):
             mirror = os.path.join(libs_dst, os.path.basename(src))
@@ -258,8 +274,23 @@ def main():
     ap.add_argument("--app", default=DEFAULT_APP_RELPATH, help="App relpath under tuyaopen-root")
     ap.add_argument("--skip-build", action="store_true", help="Reuse existing .vendor_lib_snapshot")
     ap.add_argument("--skip-blob-sync", action="store_true", help="Skip IDF prebuilt-blob mirror step")
+    ap.add_argument("--psram", action="store_true",
+                    help="Build the SPIRAM-enabled flavor from sdkconfig_esp32_psram and stage "
+                         "into libs_psram/ + link_path_psram/ (default tree left untouched)")
     ap.add_argument("--dry-run", action="store_true", help="Print plan without modifying files")
     args = ap.parse_args()
+
+    # PSRAM flavor: separate snapshot + parallel vendor dirs + inverted SPIRAM validation.
+    if args.psram:
+        snap_name = "psram"
+        dir_suffix = "_psram"
+        sdkconfig_name = f"sdkconfig_{CHIP}_psram"
+        validate_sdkconfig = validate_spiram_enabled
+    else:
+        snap_name = SNAPSHOT_NAME
+        dir_suffix = ""
+        sdkconfig_name = f"sdkconfig_{CHIP}"
+        validate_sdkconfig = validate_spiram_disabled
 
     root = os.path.dirname(os.path.abspath(__file__))
     snapshots = os.path.join(root, ".vendor_lib_snapshot")
@@ -269,25 +300,41 @@ def main():
         if not os.path.isdir(app_dir):
             print(f"Error: app dir missing: {app_dir}")
             sys.exit(1)
-        source_sdkconfig = os.path.join(root, "tuya_open_sdk", f"sdkconfig_{CHIP}")
-        if not validate_spiram_disabled(source_sdkconfig):
+        source_sdkconfig = os.path.join(root, "tuya_open_sdk", sdkconfig_name)
+        if not validate_sdkconfig(source_sdkconfig):
             sys.exit(1)
-        rm_rf(snapshots)
-        print("\n=== Building vendor libs ===")
-        clean_build_dirs(root, app_dir)
-        if not run_tos_build(args.tuyaopen_root, app_dir):
-            print("Error: tos.py build failed")
-            sys.exit(1)
-        if not snapshot_build(root, app_dir, snapshots):
-            sys.exit(1)
+        # tos.py/set_target always consumes sdkconfig_<chip>; for the PSRAM flavor we
+        # temporarily swap that file with the _psram variant and restore it afterwards.
+        active_sdkconfig = os.path.join(root, "tuya_open_sdk", f"sdkconfig_{CHIP}")
+        backup_sdkconfig = active_sdkconfig + ".prebuild_bak"
+        swapped = False
+        if args.psram:
+            shutil.copy(active_sdkconfig, backup_sdkconfig)
+            shutil.copy(source_sdkconfig, active_sdkconfig)
+            swapped = True
+            print(f"  swapped {os.path.basename(source_sdkconfig)} -> {os.path.basename(active_sdkconfig)} (backup kept)")
+        try:
+            rm_rf(os.path.join(snapshots, snap_name))
+            print(f"\n=== Building vendor libs (flavor={snap_name}) ===")
+            clean_build_dirs(root, app_dir)
+            if not run_tos_build(args.tuyaopen_root, app_dir):
+                print("Error: tos.py build failed")
+                sys.exit(1)
+            if not snapshot_build(root, app_dir, snapshots, snap_name):
+                sys.exit(1)
+        finally:
+            if swapped:
+                shutil.copy(backup_sdkconfig, active_sdkconfig)
+                os.remove(backup_sdkconfig)
+                print(f"  restored {os.path.basename(active_sdkconfig)}")
     else:
-        snap = os.path.join(snapshots, SNAPSHOT_NAME)
+        snap = os.path.join(snapshots, snap_name)
         if not os.path.isdir(snap):
             print(f"Error: --skip-build but snapshot missing: {snap}")
             sys.exit(1)
 
-    snapshot_sdkconfig = os.path.join(snapshots, SNAPSHOT_NAME, "sdkconfig.h")
-    if not validate_spiram_disabled(snapshot_sdkconfig):
+    snapshot_sdkconfig = os.path.join(snapshots, snap_name, "sdkconfig.h")
+    if not validate_sdkconfig(snapshot_sdkconfig):
         sys.exit(1)
 
     if not os.path.exists(args.out):
@@ -298,11 +345,11 @@ def main():
     except OSError:
         pass
 
-    print(f"\n=== Staging into {args.out} ===")
-    apply_to_vendor(snapshots, args.out, dry_run=args.dry_run)
+    print(f"\n=== Staging into {args.out} (libs{dir_suffix}/ link_path{dir_suffix}/) ===")
+    apply_to_vendor(snapshots, args.out, snap_name=snap_name, dir_suffix=dir_suffix, dry_run=args.dry_run)
 
     if not args.skip_blob_sync:
-        sync_idf_prebuilt_blobs(args.idf_root, args.out, dry_run=args.dry_run)
+        sync_idf_prebuilt_blobs(args.idf_root, args.out, dir_suffix=dir_suffix, dry_run=args.dry_run)
 
     print("\nDone.")
 
