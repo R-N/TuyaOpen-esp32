@@ -27,6 +27,7 @@ list(APPEND SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/drivers/tkl_pinmux.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/drivers/tkl_pwm.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/drivers/tkl_rtc.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/drivers/tkl_spi.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/drivers/tkl_timer.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/drivers/tkl_uart.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/drivers/tkl_watchdog.c"
